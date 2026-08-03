@@ -32,7 +32,7 @@ compression: normal
 publish:
   provider: github
   owner: 0x6B70
-  repo: empty
+  repo: Cue
 
 win:
   # Regenerate with `python build/make_icon.py`. The .ico carries 16-256px,
