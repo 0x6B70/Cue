@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cue — Search</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <form id="search-form" class="search" autocomplete="off">
+      <input id="search-input" type="search" data-i18n-placeholder="search.placeholder"
+             data-i18n-aria-label="search.label" spellcheck="false">
+      <button type="submit" id="search-button" data-i18n="search.submit">Search</button>
+    </form>
+    <label class="gap">
+      <span class="visually-hidden" data-i18n="gap.label">Pause between videos</span>
+      <input id="gap" type="number" min="0" max="3600" step="1" inputmode="numeric"
+             value="0" data-i18n-aria-label="gap.label" data-i18n-title="gap.label">
+      <span class="unit" aria-hidden="true" data-i18n="gap.unit">s</span>
+    </label>
+    <label class="language">
+      <span class="visually-hidden" data-i18n="language.label">Language</span>
+      <select id="language" data-i18n-aria-label="language.label">
+        <option value="en">English</option>
+        <option value="el">Ελληνικά</option>
+      </select>
+    </label>
+    <button type="button" id="btn-settings" class="icon-button" data-i18n-title="settings.open"
+            data-i18n-aria-label="settings.open">&#9881;</button>
+    <div class="status" id="connection" data-i18n-title="connection.title">
+      <span class="dot" aria-hidden="true"></span><span class="label"></span>
+    </div>
+  </header>
+
+  <dialog id="settings-dialog" class="settings-dialog">
+    <form method="dialog" class="settings">
+      <div class="settings-head">
+        <h2 data-i18n="settings.title">Settings</h2>
+        <button type="submit" class="icon-button" id="settings-close"
+                data-i18n-aria-label="settings.close">&times;</button>
+      </div>
+      <!-- Fields are rendered here from the descriptor list in app.js. -->
+      <div id="settings-fields" class="settings-fields"></div>
+      <details class="diagnostics">
+        <summary data-i18n="settings.diagnostics">Diagnostics</summary>
+        <dl id="diagnostics-body" class="diagnostics-body"></dl>
+      </details>
+      <p class="settings-advanced" data-i18n="settings.advanced">
+        Advanced options (resolver clients, Invidious instances) live in settings.json.
+      </p>
+    </form>
+  </dialog>
+
+  <div id="notice" class="notice" hidden>
+    <span id="notice-text"></span>
+    <button type="button" id="notice-dismiss" data-i18n-aria-label="notice.dismiss">&times;</button>
+  </div>
+
+  <main class="layout">
+    <section class="results" data-i18n-aria-label="results.label">
+      <div id="results-status" class="empty" data-i18n="search.empty">Search for something to get started.</div>
+      <ul id="results" class="result-list"></ul>
+    </section>
+
+    <aside class="queue-pane" data-i18n-aria-label="queue.label">
+      <div class="now-playing" id="now-playing">
+        <div class="np-title" id="np-title" data-i18n="player.nothing">Nothing playing</div>
+        <div class="np-channel" id="np-channel"></div>
+        <input type="range" id="seek" class="seek" min="0" max="1000" value="0" step="1"
+               data-i18n-aria-label="player.seek">
+        <div class="np-times"><span id="np-position">0:00</span><span id="np-duration">0:00</span></div>
+        <div class="transport">
+          <button type="button" id="btn-previous" data-i18n-title="player.previous">&#9198;</button>
+          <button type="button" id="btn-toggle" class="primary" data-i18n-title="player.toggle">&#9199;</button>
+          <button type="button" id="btn-next" data-i18n-title="player.next">&#9197;</button>
+          <label class="volume">
+            <span aria-hidden="true">&#128266;</span>
+            <input type="range" id="volume" min="0" max="130" value="100" data-i18n-aria-label="player.volume">
+          </label>
+        </div>
+        <button type="button" id="btn-open-window" class="ghost" data-i18n="player.reopen" hidden>Reopen player window</button>
+      </div>
+
+      <div class="queue-header">
+        <h2><span data-i18n="queue.heading">Queue</span> <span id="queue-count" class="count">0</span></h2>
+        <div class="queue-actions">
+          <button type="button" id="btn-clear-played" class="ghost" data-i18n="queue.clearPlayed">Clear played</button>
+          <button type="button" id="btn-clear" class="ghost" data-i18n="queue.clearAll">Clear all</button>
+        </div>
+      </div>
+      <ol id="queue" class="queue-list"></ol>
+      <p id="queue-empty" class="empty small" data-i18n="queue.empty">Queue is empty. Add something from the results.</p>
+    </aside>
+  </main>
+
+  <script src="/static/i18n.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

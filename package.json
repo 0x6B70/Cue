@@ -1,0 +1,29 @@
+{
+  "name": "cue",
+  "version": "0.2.0",
+  "description": "Cue — a desktop YouTube queue player: search in one window, ad-free playback in another.",
+  "main": "frontend/main.js",
+  "private": true,
+  "license": "MIT",
+  "author": "0x6B70",
+  "scripts": {
+    "build:potoken": "esbuild frontend/potoken/botguard.js --bundle --format=iife --platform=browser --target=chrome124 --outfile=frontend/potoken/bundle.js",
+    "build:backend": "pyinstaller build/youtube-queue-backend.spec --noconfirm --distpath build/dist --workpath build/work",
+    "build": "npm run build:potoken && npm run build:backend",
+    "start": "npm run build:potoken && electron .",
+    "dist": "npm run build && electron-builder --config build/electron-builder.yml",
+    "dist:win": "npm run build && electron-builder --win --config build/electron-builder.yml",
+    "dist:mac": "npm run build && electron-builder --mac --config build/electron-builder.yml",
+    "dist:linux": "npm run build && electron-builder --linux --config build/electron-builder.yml",
+    "test": "python -m pytest"
+  },
+  "devDependencies": {
+    "bgutils-js": "^4.0.2",
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3",
+    "esbuild": "^0.28.1"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
+  }
+}

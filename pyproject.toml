@@ -1,0 +1,40 @@
+[project]
+name = "youtube-queue-player"
+version = "0.1.0"
+description = "Desktop YouTube queue player: search in one window, ad-free playback in another."
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "python-mpv-jsonipc>=1.2",
+    "httpx>=0.27",
+    "pydantic>=2.7",
+]
+
+[project.optional-dependencies]
+# pyinstaller is required by `npm run build:backend`, which freezes the
+# backend via build/youtube-queue-backend.spec.
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "yt-dlp", "pyinstaller>=6.0"]
+
+[project.scripts]
+youtube-queue-backend = "backend.main:run"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["backend*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+filterwarnings = [
+    "error",
+    # Each test gets a fresh event loop, so subprocess transports spawned by
+    # the yt-dlp wrapper are finalized after their loop has already closed and
+    # raise from __del__. An artifact of tearing loops down mid-process; the
+    # long-lived app loop collects them normally.
+    "ignore::pytest.PytestUnraisableExceptionWarning",
+    "ignore::starlette.exceptions.StarletteDeprecationWarning",
+]

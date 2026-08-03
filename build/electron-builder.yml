@@ -1,0 +1,83 @@
+appId: com.0x6b70.cue
+productName: Cue
+copyright: ""
+
+directories:
+  output: release
+  buildResources: build
+
+# Only the shell ships as app files; the Python backend arrives through
+# extraResources as a pre-built PyInstaller directory.
+files:
+  - frontend/main.js
+  - frontend/preload.js
+  - frontend/ui/**/*
+  - frontend/potoken/bundle.js
+  - package.json
+  - "!**/*.map"
+
+extraResources:
+  # main.js resolves the backend at resources/backend/youtube-queue-backend
+  - from: build/dist/youtube-queue-backend
+    to: backend
+    filter:
+      - "**/*"
+
+asar: true
+compression: normal
+
+# Where the app checks for updates, and where `electron-builder --publish`
+# uploads them. Publishing needs GH_TOKEN set to a token with repo access; the
+# shipped app only reads public release assets, so it carries no credential.
+publish:
+  provider: github
+  owner: 0x6B70
+  repo: empty
+
+win:
+  # Regenerate with `python build/make_icon.py`. The .ico carries 16-256px,
+  # with a simplified two-bar variant at 16/24 where the full artwork smudges.
+  icon: build/icon.ico
+  target:
+    - target: nsis
+      arch: [x64]
+  artifactName: ${productName}-${version}-setup.${ext}
+
+nsis:
+  # A one-click installer hides the install directory, and this app is one
+  # people will want to point at a specific drive.
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  deleteAppDataOnUninstall: false
+
+mac:
+  target:
+    - target: dmg
+      arch: [x64, arm64]
+  category: public.app-category.entertainment
+  # Gatekeeper hard-blocks unsigned builds on current macOS, so a real
+  # release needs an Apple Developer identity and notarization.
+  hardenedRuntime: true
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+
+linux:
+  icon: build/icon.png
+  target:
+    - target: AppImage
+      arch: [x64]
+    - target: deb
+      arch: [x64]
+  category: AudioVideo
+
+# Root level, not nested under `linux:` -- electron-builder rejects `linux.deb`
+# outright, and because it validates the whole config up front that failure
+# blocked the Windows and macOS builds too.
+#
+# mpv is declared rather than bundled on Linux: distributions ship it and a
+# bundled copy would fight the system's codec and VA-API libraries.
+deb:
+  depends:
+    - mpv
