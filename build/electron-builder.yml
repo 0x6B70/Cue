@@ -31,7 +31,9 @@ compression: normal
 # shipped app only reads public release assets, so it carries no credential.
 publish:
   provider: github
-  owner: 0x6B70
+  # Quoted because unquoted 0x6B70 is valid YAML hex (parses to the integer
+  # 27504), which would make electron-updater and --publish hit the wrong repo.
+  owner: "0x6B70"
   repo: Cue
 
 win:
