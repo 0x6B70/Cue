@@ -196,15 +196,20 @@ async def test_upcoming_overlay_reaches_mpv(player):
     assert box["x1"] > box["x0"] and box["y1"] > box["y0"], "mpv laid out nothing"
 
 
-async def test_overlay_stays_clear_of_the_osc(player):
-    """mpv's default OSC is a full-width bar along the bottom of the window.
-
-    A bottom-anchored overlay measures out at y=719 of 720 -- right behind the
-    controls -- which is why this sits in the top corner instead.
-    """
+async def test_overlay_is_anchored_to_the_bottom(player):
+    """The "up next" list sits in the bottom-right corner, so it grows up out
+    of the corner rather than down from the top."""
     await player.set_upcoming(["Alpha", "Beta", "Gamma"])
     box = await layout(player, player._overlay_text)
-    assert box["y1"] < OVERLAY_RES_Y / 2, "overlay reaches into the OSC's half of the window"
+    assert box["y0"] > OVERLAY_RES_Y / 2, "overlay is not in the bottom half of the window"
+
+
+async def test_overlay_font_size_scales_the_text(player):
+    """The overlay_font_size setting drives the `\\fs` tag, so a larger size has
+    to lay out taller."""
+    small = await layout(player, compose_upcoming(["Alpha"], font_size=20))
+    large = await layout(player, compose_upcoming(["Alpha"], font_size=60))
+    assert (large["y1"] - large["y0"]) > (small["y1"] - small["y0"]), "font size did not change the height"
 
 
 async def test_overlay_is_anchored_to_the_right_edge(player):

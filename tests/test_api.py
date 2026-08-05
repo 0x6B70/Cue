@@ -141,6 +141,34 @@ def test_settings_rejects_an_invalid_ytdlp_channel(client):
     assert client.get("/api/settings").json()["ytdlp_channel"] != "bogus"
 
 
+def test_settings_accepts_a_valid_overlay_font_size(client):
+    body = client.put("/api/settings", json={"overlay_font_size": 40}).json()
+    assert body["overlay_font_size"] == 40
+    assert client.get("/api/settings").json()["overlay_font_size"] == 40
+
+
+def test_settings_rejects_an_out_of_range_overlay_font_size(client):
+    """The panel bounds this with a spinner, but a value outside the range must
+    be a clear 400 rather than a screen-filling overlay."""
+    response = client.put("/api/settings", json={"overlay_font_size": 500})
+    assert response.status_code == 400
+    assert client.get("/api/settings").json()["overlay_font_size"] != 500
+
+
+def test_settings_accepts_a_valid_overlay_position(client):
+    body = client.put("/api/settings", json={"overlay_position": "bottom-left"}).json()
+    assert body["overlay_position"] == "bottom-left"
+    assert client.get("/api/settings").json()["overlay_position"] == "bottom-left"
+
+
+def test_settings_rejects_an_invalid_overlay_position(client):
+    """The panel only offers real corners, but a bogus value must be a clear 400
+    rather than an overlay that never draws."""
+    response = client.put("/api/settings", json={"overlay_position": "middle-of-nowhere"})
+    assert response.status_code == 400
+    assert client.get("/api/settings").json()["overlay_position"] != "middle-of-nowhere"
+
+
 def test_diagnostics_reports_reliability_state(client):
     """The settings panel surfaces these; docs/reliability.md's first-check
     list must stay reachable in-app."""

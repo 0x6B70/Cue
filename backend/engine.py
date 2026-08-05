@@ -144,6 +144,15 @@ class Engine:
             return []
         return [item.title for item in self.queue.upcoming(UPCOMING_OVERLAY_COUNT)]
 
+    def invalidate_overlay(self) -> None:
+        """Force the next notify() to redraw the "up next" list.
+
+        _sync_upcoming_overlay diffs on the titles alone, so a settings change
+        that alters only the overlay's appearance -- its font size -- would not
+        otherwise reach mpv until the queue next changed shape.
+        """
+        self._overlay_titles = None
+
     def _sync_upcoming_overlay(self) -> None:
         """Keep the in-video "up next" list in step with the queue.
 

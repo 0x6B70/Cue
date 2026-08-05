@@ -27,7 +27,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import Settings, bundle_dir, user_data_dir
 from .engine import Engine
-from .player import PlayerUnavailable
+from .player import OVERLAY_ALIGNMENTS, PlayerUnavailable
 from .models import AddRequest, AppState, ReorderRequest, SearchResult, SeekRequest, VolumeRequest
 from .potoken import PoTokenBundle
 from .updater import maybe_update_ytdlp
@@ -216,6 +216,14 @@ async def get_settings() -> dict:
 # bad value should be a clear 400 rather than silently poisoning settings.json.
 _SETTING_CHOICES: dict[str, set[str]] = {
     "ytdlp_channel": {"stable", "nightly"},
+    "overlay_position": set(OVERLAY_ALIGNMENTS),
+}
+
+# Numeric settings the panel bounds with a spinner. The endpoint is public
+# within the app, so an out-of-range value should be a clear 400 rather than a
+# silently broken (or screen-filling) overlay.
+_SETTING_RANGES: dict[str, tuple[float, float]] = {
+    "overlay_font_size": (10, 96),
 }
 
 
@@ -233,8 +241,21 @@ async def update_settings(payload: dict) -> dict:
                 status_code=400,
                 detail=f"{key} must be one of {sorted(allowed)}, got {value!r}",
             )
+        bounds = _SETTING_RANGES.get(key)
+        if bounds is not None:
+            lo, hi = bounds
+            # bool is a subclass of int, so exclude it explicitly -- True would
+            # otherwise sail through the range check as 1.
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not lo <= value <= hi:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{key} must be a number between {lo} and {hi}, got {value!r}",
+                )
         setattr(settings, key, value)
     settings.save()
+    # A settings edit can change how the overlay looks without touching the
+    # queue, so make sure the next notify() actually repaints it.
+    engine.invalidate_overlay()
     engine.notify()
     return asdict(settings)
 

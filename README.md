@@ -109,7 +109,9 @@ library-validation exceptions Chromium and the spawned helpers need.
 | `offline_cache` | `true` | Downloads upcoming videos to disk so they play even if YouTube later blocks extraction. Uses disk and doubles the bandwidth of cached items. |
 | `cache_ahead` | `1` | How many upcoming items to cache. Kept shallow to avoid looking like bulk scraping. |
 | `cache_budget_gb` | `5.0` | Cache ceiling; least-recently-used items (played first) are evicted past it. |
-| `show_upcoming_overlay` | `true` | Lists the next few queued titles in the corner of the mpv window. |
+| `show_upcoming_overlay` | `true` | Lists the next few queued titles in the bottom-right corner of the mpv window. |
+| `overlay_font_size` | `28` | Point size of that overlay's text, on a 720px-tall canvas so it scales with the window. Bounded 10–96. |
+| `overlay_position` | `"bottom-right"` | Corner or edge the overlay sits in: `top-left`, `top-center`, `top-right`, `bottom-left`, `bottom-center`, `bottom-right`. |
 
 ## Reliability
 

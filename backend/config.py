@@ -210,6 +210,15 @@ class Settings:
     # watching the video rather than the queue panel. Anything drawn on top of
     # the picture is a matter of taste, so it can be turned off.
     show_upcoming_overlay: bool = True
+    # Point size of the "up next" overlay, measured on a 720px-tall virtual
+    # canvas so it scales with the window rather than being a fixed pixel size.
+    # Roughly 3-13% of the video height across its 10-96 range; 28 is the
+    # long-standing default. Bounds are enforced by PUT /api/settings.
+    overlay_font_size: int = 28
+    # Corner or edge the overlay sits in, e.g. "bottom-left", "top-right". The
+    # full set of choices is player.OVERLAY_ALIGNMENTS; PUT /api/settings rejects
+    # anything outside it.
+    overlay_position: str = "bottom-right"
     # Start each session with an empty queue. Only applies to a clean exit --
     # if the app is killed outright, nothing gets the chance to run.
     clear_queue_on_exit: bool = True

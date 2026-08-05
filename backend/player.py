@@ -43,8 +43,25 @@ OVERLAY_RES_Y = 720
 OVERLAY_TITLE_CHARS = 40
 
 # Point size on the OVERLAY_RES_Y canvas, so this is a fraction of window
-# height rather than pixels -- it looks the same fullscreen and windowed.
+# height rather than pixels -- it looks the same fullscreen and windowed. This
+# is the fallback default; the live value comes from settings.overlay_font_size.
 OVERLAY_FONT_SIZE = 28
+
+# ASS `\an` alignment codes, laid out like a numpad, for each overlay position
+# the settings panel offers. Only the top and bottom edges are here: the middle
+# row sits over the middle of the picture, where an "up next" list has no
+# business being.
+OVERLAY_ALIGNMENTS = {
+    "top-left": 7,
+    "top-center": 8,
+    "top-right": 9,
+    "bottom-left": 1,
+    "bottom-center": 2,
+    "bottom-right": 3,
+}
+
+# Where the overlay sits when settings.overlay_position is unset or unknown.
+OVERLAY_DEFAULT_POSITION = "bottom-right"
 
 OVERLAY_HEADING = "Up next"
 
@@ -75,23 +92,33 @@ def _truncate(text: str, limit: int = OVERLAY_TITLE_CHARS) -> str:
     return text[: limit - 1].rstrip() + "…"
 
 
-def compose_upcoming(titles: list[str]) -> str:
+def compose_upcoming(
+    titles: list[str],
+    font_size: int = OVERLAY_FONT_SIZE,
+    position: str = OVERLAY_DEFAULT_POSITION,
+) -> str:
     r"""Build the ASS event for the "up next" list.
 
-    `\an9` anchors it to the top right. Bottom right is the more obvious
-    corner and the first thing tried, but mpv's default OSC is a full-width
-    bar along the bottom: a bottom-anchored overlay measures out at y=719 of
-    720, directly behind the controls. The top right is the only corner that
-    is clear of both the OSC and mpv's own OSD messages, which draw top left.
+    `position` picks an `\an` alignment (see OVERLAY_ALIGNMENTS), so the block
+    anchors to a corner or edge and grows inward from it. A left or right anchor
+    grows the text horizontally toward the middle; a centre anchor grows it
+    symmetrically. Either way titles are truncated first, so nothing runs off
+    the frame even though the overlay is laid out at an unknown width (res_x is
+    left at 0 so mpv keeps pixels square).
+
+    A bottom position shares space with mpv's on-screen controller, a full-width
+    bar along the bottom, but the OSC only appears on mouse movement and hides
+    itself again, so the two are seldom on screen at once.
 
     `\q2` stops libass wrapping a title back across the picture, and the
     outline (`\bord2`) keeps it readable over a bright frame.
     """
     lines = [f"{n}. {_ass_escape(_truncate(title))}" for n, title in enumerate(titles, 1)]
     body = "\\N".join([_ass_escape(OVERLAY_HEADING), *lines])
+    align = OVERLAY_ALIGNMENTS.get(position, OVERLAY_ALIGNMENTS[OVERLAY_DEFAULT_POSITION])
     # Built by concatenation: an f-string here would need doubled braces around
     # ASS's own braces, which reads as a typo.
-    style = "{\\an9\\fs" + str(OVERLAY_FONT_SIZE) + "\\bord2\\shad0\\q2}"
+    style = "{\\an" + str(align) + "\\fs" + str(font_size) + "\\bord2\\shad0\\q2}"
     return style + body
 
 
@@ -395,7 +422,15 @@ class MpvPlayer:
         mpv = self.mpv
         if mpv is None:
             return
-        text = compose_upcoming(self._upcoming) if self._upcoming else ""
+        text = (
+            compose_upcoming(
+                self._upcoming,
+                self.settings.overlay_font_size,
+                self.settings.overlay_position,
+            )
+            if self._upcoming
+            else ""
+        )
         if text == self._overlay_text:
             return
         try:

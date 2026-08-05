@@ -391,6 +391,14 @@
   // deliberately left to settings.json -- see the note in the dialog.
   const SETTINGS_FIELDS = [
     { key: 'show_upcoming_overlay', type: 'toggle', group: 'settings.group.overlay' },
+    {
+      key: 'overlay_position',
+      type: 'select',
+      options: ['top-left', 'top-center', 'top-right', 'bottom-left', 'bottom-center', 'bottom-right'],
+      optionLabels: true, // localise each option via settings.<key>.<value>
+      group: 'settings.group.overlay'
+    },
+    { key: 'overlay_font_size', type: 'number', min: 10, max: 96, step: 1, group: 'settings.group.overlay' },
     { key: 'gap_seconds', type: 'number', min: 0, max: 3600, step: 1, group: 'settings.group.playback' },
     { key: 'max_height', type: 'select', options: [360, 480, 720, 1080, 1440, 2160], group: 'settings.group.playback' },
     { key: 'clear_queue_on_exit', type: 'toggle', group: 'settings.group.playback' },
@@ -439,7 +447,7 @@
         for (const opt of field.options) {
           const option = document.createElement('option');
           option.value = String(opt);
-          option.textContent = String(opt);
+          option.textContent = field.optionLabels ? t(`settings.${field.key}.${opt}`) : String(opt);
           control.appendChild(option);
         }
         control.value = String(saved[field.key]);
