@@ -76,7 +76,7 @@ def test_greek_strings_are_actually_greek(tables):
     block = _locale_block(source, "el")
     # Keys that are pure placeholders or technical proper nouns ("PO token")
     # have no translatable prose.
-    exempt = {"notice.resolve_failed", "notice.player_unavailable", "app.title", "settings.diag.potoken"}
+    exempt = {"notice.resolve_failed", "notice.player_unavailable", "app.title", "settings.diag.potoken", "settings.diag.ffmpeg"}
     for key, value in re.findall(r"'([\w.]+)':\s*\n?\s*'([^']*)'", block):
         if key in exempt or not value.strip():
             continue

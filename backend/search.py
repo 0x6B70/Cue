@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import logging
 
+import httpx
+
 from .models import SearchResult
 from .ytdlp import YtDlp
 
@@ -43,6 +45,33 @@ def parse_entry(entry: dict) -> SearchResult | None:
         thumbnail=thumbnail_for(entry, video_id),
         live=live_status in ("is_live", "is_upcoming"),
     )
+
+
+# YouTube's own search-box completions. `client=firefox` returns plain JSON,
+# ["query", ["suggestion", ...], ...], rather than the JSONP the site uses.
+SUGGEST_URL = "https://suggestqueries.google.com/complete/search"
+
+# Completions are only useful while typing; a slow answer is a useless one.
+SUGGEST_TIMEOUT = 2.5
+
+
+async def youtube_suggestions(query: str, locale: str = "en") -> list[str]:
+    """Search-box completions from YouTube. Never raises: [] on any failure."""
+    query = query.strip()
+    if not query:
+        return []
+    params = {"client": "firefox", "ds": "yt", "q": query, "hl": locale or "en"}
+    try:
+        async with httpx.AsyncClient(timeout=SUGGEST_TIMEOUT) as client:
+            response = await client.get(SUGGEST_URL, params=params)
+            response.raise_for_status()
+            payload = response.json()
+    except (httpx.HTTPError, ValueError):
+        log.debug("suggestions for %r failed", query, exc_info=True)
+        return []
+    if not (isinstance(payload, list) and len(payload) > 1 and isinstance(payload[1], list)):
+        return []
+    return [text for text in payload[1] if isinstance(text, str)]
 
 
 class SearchService:

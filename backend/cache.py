@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import httpx
@@ -31,6 +32,55 @@ log = logging.getLogger(__name__)
 GIB = 1024**3
 DOWNLOAD_TIMEOUT = 300.0
 _CHUNK = 1 << 16
+# Size of each ranged request; yt-dlp's own http_chunk_size for YouTube.
+RANGE_BYTES = 10 * 1024 * 1024
+
+
+def _range_total(content_range: str | None) -> int | None:
+    """Total length from a `Content-Range: bytes a-b/total` header."""
+    if not content_range or "/" not in content_range:
+        return None
+    total = content_range.rsplit("/", 1)[1].strip()
+    return int(total) if total.isdigit() else None
+
+
+async def download_ranged(
+    url: str,
+    headers: dict[str, str] | None,
+    dest: Path,
+    progress: Callable[[int, int | None], None] | None = None,
+) -> None:
+    """Stream a URL to `dest` atomically (via a .part file).
+
+    Fetched in bounded ranges, the way yt-dlp does it. googlevideo now
+    answers a plain GET (and an open-ended range) with 403 for some clients
+    while serving `bytes=a-b` happily, and bounded requests also sidestep its
+    per-connection throttling. `progress(done, total)` is called after each
+    range; total is None until the server has said how long the file is.
+    """
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    start, total = 0, None
+    try:
+        async with httpx.AsyncClient(timeout=DOWNLOAD_TIMEOUT, follow_redirects=True) as client:
+            with open(tmp, "wb") as handle:
+                while total is None or start < total:
+                    ranged = {**(headers or {}), "Range": f"bytes={start}-{start + RANGE_BYTES - 1}"}
+                    async with client.stream("GET", url, headers=ranged) as response:
+                        response.raise_for_status()
+                        async for chunk in response.aiter_bytes(_CHUNK):
+                            handle.write(chunk)
+                        if response.status_code != 206:
+                            break  # the server ignored the range and sent it all
+                        total = _range_total(response.headers.get("content-range"))
+                        if total is None:
+                            break  # no length to aim for; take what came
+                    start = handle.tell()
+                    if progress:
+                        progress(start, total)
+        tmp.replace(dest)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 class OfflineCache:
@@ -84,11 +134,45 @@ class OfflineCache:
 
     # ----------------------------------------------------------------- store
 
-    async def store(self, stream: ResolvedStream) -> bool:
+    def entries(self) -> list[dict]:
+        """Every fully cached item with what is known about it, newest first.
+
+        Entries cached before metadata was recorded carry only their id; the
+        caller fills the gaps from the library.
+        """
+        out = []
+        for video_id, entry in self._index.items():
+            if not self.has(video_id):
+                continue
+            out.append(
+                {
+                    "id": video_id,
+                    "title": entry.get("title"),
+                    "channel": entry.get("channel"),
+                    "duration": entry.get("duration"),
+                    "thumbnail": entry.get("thumbnail"),
+                    "size": entry.get("size", 0),
+                    "atime": entry.get("atime", 0),
+                }
+            )
+        out.sort(key=lambda e: e["atime"], reverse=True)
+        return out
+
+    def ids(self) -> list[str]:
+        """Videos whose files are all still on disk.
+
+        Not the bare index: an entry whose file was deleted would otherwise
+        keep showing as cached in the UI forever.
+        """
+        return [video_id for video_id in self._index if self.has(video_id)]
+
+    async def store(self, stream: ResolvedStream, meta: dict | None = None) -> bool:
         """Download a resolved stream to disk. Returns True once fully cached.
 
-        Best-effort: a failed download leaves nothing behind and returns False,
-        so caching never blocks or breaks playback.
+        `meta` (title, channel, thumbnail) is kept in the index so downloads
+        can be listed and searched by name. Best-effort: a failed download
+        leaves nothing behind and returns False, so caching never blocks or
+        breaks playback.
         """
         if not self.enabled():
             return False
@@ -116,21 +200,17 @@ class OfflineCache:
             "audio": audio_name,
             "size": size,
             "atime": time.time(),
+            "title": (meta or {}).get("title") or stream.title,
+            "channel": (meta or {}).get("channel"),
+            "duration": stream.duration or (meta or {}).get("duration"),
+            "thumbnail": (meta or {}).get("thumbnail"),
         }
         self._save_index()
         log.info("cached %s (%.1f MiB)", stream.video_id, size / (1024**2))
         return True
 
     async def _download(self, url: str, headers: dict[str, str] | None, dest: Path) -> None:
-        """Stream a URL to `dest` atomically (via a .part file)."""
-        tmp = dest.with_suffix(dest.suffix + ".part")
-        async with httpx.AsyncClient(timeout=DOWNLOAD_TIMEOUT, follow_redirects=True) as client:
-            async with client.stream("GET", url, headers=headers or {}) as response:
-                response.raise_for_status()
-                with open(tmp, "wb") as handle:
-                    async for chunk in response.aiter_bytes(_CHUNK):
-                        handle.write(chunk)
-        tmp.replace(dest)
+        await download_ranged(url, headers, dest)
 
     # -------------------------------------------------------------- eviction
 

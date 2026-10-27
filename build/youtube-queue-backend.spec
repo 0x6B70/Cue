@@ -18,7 +18,7 @@ datas = [
     (str(project_root / "frontend" / "potoken"), "frontend/potoken"),
 ]
 
-# Helper binaries (mpv, yt-dlp) land next to the frozen app so
+# Helper binaries (mpv, yt-dlp, deno, ffmpeg) land next to the frozen app so
 # config.find_binary picks them up via bundle_dir()/vendor. Optional at build
 # time: without them the app falls back to whatever is on PATH.
 vendor_dir = project_root / "vendor"

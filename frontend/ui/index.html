@@ -9,10 +9,22 @@
 <body>
   <header class="topbar">
     <form id="search-form" class="search" autocomplete="off">
-      <input id="search-input" type="search" data-i18n-placeholder="search.placeholder"
-             data-i18n-aria-label="search.label" spellcheck="false">
+      <div class="search-box">
+        <!-- Inline completion: the typed text (invisible) plus the rest of the
+             top suggestion, drawn behind the transparent input. -->
+        <div id="search-ghost" class="search-ghost" aria-hidden="true"><span class="typed"></span><span class="rest"></span></div>
+        <input id="search-input" type="text" data-i18n-placeholder="search.placeholder"
+               data-i18n-aria-label="search.label" spellcheck="false" role="combobox"
+               aria-autocomplete="both" aria-expanded="false" aria-controls="suggestions">
+        <ul id="suggestions" class="suggestions" role="listbox" hidden></ul>
+      </div>
       <button type="submit" id="search-button" data-i18n="search.submit">Search</button>
     </form>
+    <label class="singer">
+      <span class="visually-hidden" data-i18n="singer.label">Singer</span>
+      <input id="singer-input" type="text" maxlength="80" spellcheck="false"
+             data-i18n-placeholder="singer.placeholder" data-i18n-title="singer.help">
+    </label>
     <label class="gap">
       <span class="visually-hidden" data-i18n="gap.label">Pause between videos</span>
       <input id="gap" type="number" min="0" max="3600" step="1" inputmode="numeric"
@@ -58,14 +70,74 @@
   </div>
 
   <main class="layout">
-    <section class="results" data-i18n-aria-label="results.label">
-      <div id="results-status" class="empty" data-i18n="search.empty">Search for something to get started.</div>
-      <ul id="results" class="result-list"></ul>
+    <section class="results-pane">
+      <nav class="tabs" role="tablist">
+        <button type="button" role="tab" class="tab active" data-tab="search" data-i18n="tab.search">Search</button>
+        <button type="button" role="tab" class="tab" data-tab="favourites" data-i18n="tab.favourites">Favourites</button>
+        <button type="button" role="tab" class="tab" data-tab="history" data-i18n="tab.history">History</button>
+        <button type="button" role="tab" class="tab" data-tab="downloads" data-i18n="tab.downloads">Downloads</button>
+        <button type="button" role="tab" class="tab" data-tab="stats" data-i18n="tab.stats">Stats</button>
+      </nav>
+
+      <div class="panel results" data-panel="search" data-i18n-aria-label="results.label">
+        <div id="library-matches" class="library-matches" hidden>
+          <h3 class="section-heading" data-i18n="search.fromLibrary">From your library</h3>
+          <ul id="library-results" class="result-list"></ul>
+          <h3 class="section-heading" data-i18n="search.fromYoutube">From YouTube</h3>
+        </div>
+        <div id="results-status" class="empty" data-i18n="search.empty">Search for something to get started.</div>
+        <ul id="results" class="result-list"></ul>
+      </div>
+
+      <div class="panel results" data-panel="favourites" hidden>
+        <input type="search" class="filter" data-filter="favourites" data-i18n-placeholder="library.filter">
+        <ul class="result-list" data-list="favourites"></ul>
+        <p class="empty" data-empty="favourites" data-i18n="library.noFavourites" hidden>No favourites yet.</p>
+      </div>
+
+      <div class="panel results" data-panel="history" hidden>
+        <input type="search" class="filter" data-filter="history" data-i18n-placeholder="library.filter">
+        <ul class="result-list" data-list="history"></ul>
+        <p class="empty" data-empty="history" data-i18n="library.noHistory" hidden>Nothing played yet.</p>
+      </div>
+
+      <div class="panel results" data-panel="downloads" hidden>
+        <input type="search" class="filter" data-filter="downloads" data-i18n-placeholder="library.filter">
+        <div class="saved-head">
+          <h3 class="section-heading" data-i18n="local.heading">Your folders</h3>
+          <button type="button" id="btn-rescan" class="ghost" data-i18n="local.rescan">Rescan</button>
+        </div>
+        <p id="local-folders" class="panel-note"></p>
+        <ul class="result-list" data-list="local"></ul>
+        <p class="empty small" data-empty="local" data-i18n="local.none" hidden>No videos in your folders yet.</p>
+
+        <div class="saved-head saved-section">
+          <h3 class="section-heading" data-i18n="saved.heading">Saved to your folder</h3>
+          <span id="saved-dir" class="panel-note"></span>
+          <button type="button" id="btn-open-folder" class="ghost" data-i18n="saved.openFolder">Open folder</button>
+        </div>
+        <p id="saved-ffmpeg" class="panel-note warn-note" data-i18n="saved.noFfmpeg" hidden></p>
+        <ul class="result-list" data-list="saved"></ul>
+        <p class="empty small" data-empty="saved" data-i18n="saved.none" hidden>Nothing saved yet.</p>
+
+        <h3 class="section-heading cache-heading" data-i18n="cache.heading">Offline cache</h3>
+        <p class="panel-note" id="downloads-summary"></p>
+        <ul class="result-list" data-list="downloads"></ul>
+        <p class="empty small" data-empty="downloads" data-i18n="library.noDownloads" hidden>No downloaded videos yet.</p>
+      </div>
+
+      <div class="panel results" data-panel="stats" hidden>
+        <div id="stats" class="stats"></div>
+      </div>
     </section>
 
     <aside class="queue-pane" data-i18n-aria-label="queue.label">
       <div class="now-playing" id="now-playing">
-        <div class="np-title" id="np-title" data-i18n="player.nothing">Nothing playing</div>
+        <div class="np-head">
+          <div class="np-title" id="np-title" data-i18n="player.nothing">Nothing playing</div>
+          <button type="button" id="np-save" class="save-btn" hidden>&#11015;</button>
+          <button type="button" id="np-star" class="star" hidden>&#9734;</button>
+        </div>
         <div class="np-channel" id="np-channel"></div>
         <input type="range" id="seek" class="seek" min="0" max="1000" value="0" step="1"
                data-i18n-aria-label="player.seek">

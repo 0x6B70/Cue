@@ -198,7 +198,11 @@ def settings(stub_ytdlp, monkeypatch):
 
     monkeypatch.delenv("STUB_FAIL_MODE", raising=False)
     monkeypatch.delenv("STUB_FAIL_CLIENTS", raising=False)
-    created = Settings(ytdlp_path=stub_ytdlp, ytdlp_auto_update=False, invidious_fallback=False)
+    # verify_streams off: the stub's URLs point nowhere, so the playability
+    # probe would fail every resolve. tests/test_resolver.py covers the probe.
+    created = Settings(
+        ytdlp_path=stub_ytdlp, ytdlp_auto_update=False, invidious_fallback=False, verify_streams=False
+    )
     # The stub is a python script, not a real binary; run it through the
     # interpreter on platforms where the shebang will not be honoured.
     return created

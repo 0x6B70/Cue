@@ -63,7 +63,7 @@ per-run auth token to `backend.json` in the user data directory.
 .venv/bin/python -m pytest
 ```
 
-130 tests. Extraction is exercised against a stubbed yt-dlp binary, so the
+About 290 tests. Extraction is exercised against a stubbed yt-dlp binary, so the
 suite needs no network. `tests/test_player_integration.py` drives a real mpv
 process using lavfi test sources — it needs no display and skips when mpv is
 absent.

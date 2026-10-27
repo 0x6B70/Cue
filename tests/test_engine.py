@@ -6,6 +6,7 @@ import time
 import pytest
 
 from backend.engine import Engine
+from backend.library import Library
 from backend.models import AddRequest, ItemState, PlaybackState, PlayerStatus
 from backend.playqueue import PlayQueue
 from backend.resolver import ResolvedStream
@@ -24,6 +25,9 @@ class FakePlayer:
         self.loaded: list[dict] = []
         self.seeks: list[float] = []
         self.upcoming: list[list[str]] = []
+        self.entries: list = []
+        self.intermissions: list = []
+        self.timers: list = []
         self.fail_load = False
         self.on_end_file = None
         self.on_status_change = None
@@ -36,13 +40,15 @@ class FakePlayer:
     def shutdown(self):
         self.running = False
 
-    async def load(self, video_url, audio_url, title, headers=None, video_id=None):
+    async def load(self, video_url, audio_url, title, headers=None, video_id=None, start=None):
         if self.fail_load:
             from backend.player import PlayerUnavailable
 
             raise PlayerUnavailable("no window")
         await self.ensure_started()
-        self.loaded.append({"video_url": video_url, "audio_url": audio_url, "title": title, "video_id": video_id})
+        self.loaded.append(
+            {"video_url": video_url, "audio_url": audio_url, "title": title, "video_id": video_id, "start": start}
+        )
         self.status.state = PlaybackState.PLAYING
 
     async def stop(self):
@@ -60,8 +66,19 @@ class FakePlayer:
     async def set_volume(self, level):
         self.status.volume = level
 
-    async def set_upcoming(self, titles):
-        self.upcoming.append(list(titles))
+    async def set_upcoming(self, entries):
+        # Recorded as titles: what most tests care about is which items show.
+        self.upcoming.append([getattr(e, "title", e) for e in entries])
+        self.entries = list(entries)
+
+    async def set_intermission(self, entry, remaining=0.0, total=0.0):
+        self.intermissions.append(entry and (entry.title, remaining, total))
+
+    async def set_timer(self, text):
+        self.timers.append(text)
+
+    def reload_logo(self):
+        pass
 
 
 @pytest.fixture
@@ -77,6 +94,10 @@ async def engine(settings, monkeypatch, tmp_path):
     created.cache.dir = tmp_path / "cache"
     created.cache._index_path = created.cache.dir / "index.json"
     created.cache._index = {}
+    created.library = Library(tmp_path / "library.db")
+    created.saver.library = created.library
+    created.saver.cache = created.cache
+    settings.download_dir = str(tmp_path / "saved")
     await created.start(open_player=False)
     yield created
     await created.shutdown()
@@ -218,17 +239,107 @@ async def test_advance_skips_failed_items(engine):
     assert engine.queue.current_item.video_id == "c"
 
 
-async def test_queue_where_nothing_resolves_terminates(engine, monkeypatch):
+async def test_queue_where_nothing_resolves_stalls_instead_of_failing_everything(engine, monkeypatch):
+    """A systemic failure (bot check, network) must not mark the whole queue
+    failed: it stops after STALL_AFTER items and waits to retry."""
+    from backend.engine import STALL_AFTER
     from backend.resolver import ResolveError
 
     async def always_fail(video_id, force=False):
-        raise ResolveError("nope")
+        raise ResolveError("nope", kind=FailureKind.BOT_CHECK)
 
     monkeypatch.setattr(engine.resolver, "resolve", always_fail)
+    for i in range(6):
+        await engine.add(add(f"v{i}"))
+    assert await until(lambda: engine.stalled)
+    assert not any(item.state is ItemState.FAILED for item in engine.queue.items)
+    # Parked on the first item of the streak, which shows as a warning.
+    assert engine.queue.current == 0
+    assert engine.queue.items[0].error_code
+    assert engine.notice_code == "notice.stalled"
+    # Items beyond the streak were never even tried.
+    assert all(item.error_code is None for item in engine.queue.items[STALL_AFTER:])
+
+
+async def test_per_video_failures_still_skip_without_stalling(engine, monkeypatch):
+    from backend.resolver import ResolveError
+
+    async def gone(video_id, force=False):
+        raise ResolveError("gone", kind=FailureKind.UNAVAILABLE)
+
+    monkeypatch.setattr(engine.resolver, "resolve", gone)
     for i in range(4):
         await engine.add(add(f"v{i}"))
     await drain(engine)
+    assert not engine.stalled
     assert all(item.state is ItemState.FAILED for item in engine.queue.items)
+
+
+async def test_stall_retries_and_resumes_when_youtube_recovers(engine, monkeypatch):
+    from backend import engine as engine_module
+    from backend.resolver import ResolveError
+
+    monkeypatch.setattr(engine_module, "STALL_RETRY_DELAYS", (0.05,))
+    broken = {"on": True}
+    original = engine.resolver.resolve
+
+    async def flaky(video_id, force=False):
+        if broken["on"]:
+            raise ResolveError("blocked", kind=FailureKind.BOT_CHECK)
+        return await original(video_id, force)
+
+    monkeypatch.setattr(engine.resolver, "resolve", flaky)
+    for i in range(3):
+        await engine.add(add(f"v{i}"))
+    assert await until(lambda: engine.stalled)
+    broken["on"] = False
+    await asyncio.sleep(0.1)
+    await drain(engine)
+    assert not engine.stalled
+    assert engine.queue.current == 0
+    assert engine.queue.items[0].state is ItemState.PLAYING
+    assert engine.notice_code is None
+
+
+async def test_single_broken_video_is_skipped_without_stalling(engine, monkeypatch):
+    from backend.resolver import ResolveError
+
+    original = engine.resolver.resolve
+
+    async def one_broken(video_id, force=False):
+        if video_id == "bad":
+            raise ResolveError("nope", kind=FailureKind.NO_FORMATS)
+        return await original(video_id, force)
+
+    monkeypatch.setattr(engine.resolver, "resolve", one_broken)
+    await engine.add(add("bad"))
+    await engine.add(add("good"))
+    await drain(engine)
+    assert not engine.stalled
+    assert engine.queue.items[0].state is ItemState.FAILED
+    assert engine.queue.items[1].state is ItemState.PLAYING
+
+
+async def test_manual_next_ends_a_stall(engine, monkeypatch):
+    from backend.resolver import ResolveError
+
+    original = engine.resolver.resolve
+    broken = {"on": True}
+
+    async def flaky(video_id, force=False):
+        if broken["on"]:
+            raise ResolveError("blocked", kind=FailureKind.NETWORK)
+        return await original(video_id, force)
+
+    monkeypatch.setattr(engine.resolver, "resolve", flaky)
+    for i in range(3):
+        await engine.add(add(f"v{i}"))
+    assert await until(lambda: engine.stalled)
+    broken["on"] = False
+    await engine.play_index(2)
+    await drain(engine)
+    assert not engine.stalled
+    assert engine.queue.items[2].state is ItemState.PLAYING
 
 
 async def test_remove_playing_item_advances(engine):
@@ -701,3 +812,252 @@ async def test_state_reports_queue_and_player(engine):
     assert state.current == 0
     assert len(state.items) == 1
     assert state.player.state is PlaybackState.PLAYING
+
+
+async def test_streams_that_load_then_die_stall_the_queue(engine):
+    """The October 2026 failure: every stream loads, then 403s in mpv.
+
+    A successful load must not count as success, or each item resets the
+    streak, fails on its own, and the whole queue goes red one by one.
+    """
+    for i in range(5):
+        await engine.add(add(f"v{i}"))
+    await drain(engine)
+    for _ in range(6):
+        if engine.stalled:
+            break
+        engine.player.on_end_file("error")
+        await drain(engine)
+    assert engine.stalled
+    assert not any(item.state is ItemState.FAILED for item in engine.queue.items)
+
+
+async def test_audio_actually_heard_resets_the_failure_streak(engine):
+    await engine.add(add("a"))
+    await engine.add(add("b"))
+    await drain(engine)
+    engine._failure_streak = ["someone-else"]
+    for position in (1.0, 2.0, 3.0, 4.0):
+        engine.player.status.position = position
+        engine._on_status_change()
+    assert engine._failure_streak == []
+
+
+async def test_playback_failure_demotes_the_tier(engine, settings):
+    settings.save = lambda: None
+    await engine.add(add("a"))
+    await drain(engine)
+    tier = engine._current_tier
+    assert tier
+    settings.last_successful_tier = tier
+    engine.player.on_end_file("error")
+    await drain(engine)
+    assert engine.resolver.tier_health[tier] in ("playback_failed", "ok")
+    # The retry re-resolved; it must not have gone straight back on the
+    # strength of the stale preference alone.
+    assert engine.settings.last_successful_tier in (None, tier)
+
+
+async def test_plays_are_recorded_in_history(engine):
+    await engine.add(add("a", singer="Maria"))
+    await drain(engine)
+    for position in range(1, 26):
+        engine.player.status.position = float(position)
+        engine._on_status_change()
+    engine.player.on_end_file("eof")
+    await drain(engine)
+    history = engine.library.history()
+    assert [h["id"] for h in history] == ["a"]
+    assert history[0]["singer"] == "Maria"
+    assert history[0]["completed"]
+    assert engine.library.stats()["plays"] == 1
+
+
+async def test_singer_reaches_the_overlay(engine):
+    await engine.add(add("a"))
+    await engine.add(add("b", singer="Nikos"))
+    await drain(engine)
+    assert engine.player.entries[0].singer == "Nikos"
+    await engine.set_singer(1, "Eleni")
+    await drain(engine)
+    assert engine.player.entries[0].singer == "Eleni"
+
+
+async def test_intermission_is_shown_during_the_gap_and_removed(engine, settings):
+    settings.gap_seconds = 0.3
+    await engine.add(add("a"))
+    await engine.add(add("b", singer="Nikos"))
+    await drain(engine)
+    engine.player.on_end_file("eof")
+    await asyncio.sleep(0.1)
+    assert any(entry and entry[0] == "Title b" for entry in engine.player.intermissions)
+    await drain(engine)
+    assert engine.player.intermissions[-1] is None
+    assert engine.queue.current_item.video_id == "b"
+
+
+async def test_favourites_are_in_state_and_protected_from_eviction(engine):
+    await engine.add(add("a"))
+    await drain(engine)
+    engine.set_favourite("a", True)
+    assert engine.state().favourites == ["a"]
+    assert "a" in engine._cache_protect()
+    engine.set_favourite("a", False)
+    assert engine.state().favourites == []
+
+
+async def test_a_saved_file_plays_without_resolving(engine, tmp_path, monkeypatch):
+    saved = tmp_path / "Song [a].mp4"
+    saved.write_bytes(b"video")
+    engine.library.set_saved("a", str(saved), title="Song")
+
+    async def must_not_resolve(video_id, force=False, muxed=False):
+        raise AssertionError("resolved a saved video")
+
+    monkeypatch.setattr(engine.resolver, "resolve", must_not_resolve)
+    await engine.add(add("a"))
+    await drain(engine)
+    assert engine.player.loaded[-1]["video_url"] == str(saved)
+    assert engine.queue.items[0].state is ItemState.PLAYING
+    assert "a" in engine.state().saved
+
+
+async def test_download_played_saves_a_song_once_it_finishes(engine, settings, monkeypatch):
+    settings.download_played = True
+    requested = []
+    monkeypatch.setattr(engine.saver, "request", lambda vid, **meta: requested.append((vid, meta["title"])) or _Job())
+    await engine.add(add("a"))
+    await drain(engine)
+    for position in range(1, 5):
+        engine.player.status.position = float(position)
+        engine._on_status_change()
+    engine.player.on_end_file("eof")
+    await drain(engine)
+    assert requested == [("a", engine.queue.items[0].title)]
+
+
+class _Job:
+    def public(self):
+        return {"state": "queued"}
+
+
+async def test_watchdog_reloads_a_frozen_stream_where_it_stopped(engine, monkeypatch):
+    from backend import engine as engine_module
+
+    monkeypatch.setattr(engine_module, "WATCHDOG_INTERVAL", 0.02)
+    monkeypatch.setattr(engine_module, "STUCK_SECONDS", 0.1)
+    _restart_watchdog(engine)
+    await engine.add(add("a"))
+    await drain(engine, timeout=1)
+    engine.player.status.position = 42.0
+    engine.player.status.duration = 200.0
+    await asyncio.sleep(0.3)
+    resumed = [entry for entry in engine.player.loaded if entry["start"]]
+    assert resumed and resumed[0]["start"] == 42.0
+    # A resume is not a new play in the history.
+    assert engine.library.db.execute("SELECT COUNT(*) FROM plays").fetchone()[0] == 1
+
+
+async def test_watchdog_moves_on_when_frozen_at_the_very_end(engine, monkeypatch):
+    from backend import engine as engine_module
+
+    monkeypatch.setattr(engine_module, "WATCHDOG_INTERVAL", 0.02)
+    monkeypatch.setattr(engine_module, "STUCK_SECONDS", 0.1)
+    _restart_watchdog(engine)
+    await engine.add(add("a"))
+    await engine.add(add("b"))
+    await drain(engine, timeout=1)
+    engine.player.status.duration = 200.0
+    engine.player.status.position = 197.0
+    await asyncio.sleep(0.4)
+    assert engine.queue.current_item.video_id == "b"
+
+
+async def test_watchdog_leaves_a_paused_song_alone(engine, monkeypatch):
+    from backend import engine as engine_module
+
+    monkeypatch.setattr(engine_module, "WATCHDOG_INTERVAL", 0.02)
+    monkeypatch.setattr(engine_module, "STUCK_SECONDS", 0.1)
+    _restart_watchdog(engine)
+    await engine.add(add("a"))
+    await drain(engine, timeout=1)
+    await engine.pause()
+    engine.player.status.position = 42.0
+    await asyncio.sleep(0.3)
+    assert len(engine.player.loaded) == 1
+
+
+def _restart_watchdog(engine):
+    """Start the watchdog again so it picks up the patched timings now."""
+    engine._watchdog_task.cancel()
+    engine._watchdog_task = asyncio.create_task(engine._watchdog())
+
+
+async def until(predicate, timeout: float = 5.0) -> bool:
+    """Poll for an asynchronous outcome instead of guessing a fixed sleep."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        await asyncio.sleep(0.01)
+    return predicate()
+
+
+def _library_file(settings, tmp_path, name="My Song.mp4"):
+    folder = tmp_path / "Karaoke"
+    folder.mkdir(exist_ok=True)
+    path = folder / name
+    path.write_bytes(b"video")
+    settings.library_folders = [str(folder)]
+    return path
+
+
+async def test_a_local_file_plays_without_resolving(engine, settings, tmp_path, monkeypatch):
+    from backend.localfiles import file_id
+
+    path = _library_file(settings, tmp_path)
+
+    async def must_not_resolve(video_id, force=False, muxed=False):
+        raise AssertionError("resolved a local file")
+
+    monkeypatch.setattr(engine.resolver, "resolve", must_not_resolve)
+    item = await engine.add(AddRequest(video_id=file_id(path), singer="Maria"))
+    await drain(engine)
+    assert item.title == "My Song"
+    assert item.local_path == str(path)
+    assert engine.player.loaded[-1]["video_url"] == str(path)
+    assert engine.queue.items[0].state is ItemState.PLAYING
+
+
+async def test_an_unknown_local_id_is_refused(engine):
+    with pytest.raises(LookupError):
+        await engine.add(AddRequest(video_id="local-0000000000000000"))
+
+
+async def test_a_deleted_local_file_fails_without_stalling(engine, settings, tmp_path):
+    from backend.localfiles import file_id
+
+    first = _library_file(settings, tmp_path, "a.mp4")
+    second = _library_file(settings, tmp_path, "b.mp4")
+    await engine.add(AddRequest(video_id=file_id(first)))
+    await engine.add(AddRequest(video_id=file_id(second)))
+    await drain(engine)
+    first.unlink()
+    second.unlink()
+    await engine.play_index(0)
+    await drain(engine)
+    assert not engine.stalled
+    assert all(item.state is ItemState.FAILED for item in engine.queue.items)
+    assert engine.queue.items[0].error_code == "error.file_missing"
+
+
+async def test_a_copy_in_the_library_folders_beats_streaming(engine, settings, tmp_path, monkeypatch):
+    path = _library_file(settings, tmp_path, "Song [abcdefghijk].mkv")
+
+    async def must_not_resolve(video_id, force=False, muxed=False):
+        raise AssertionError("streamed a video that is on disk")
+
+    monkeypatch.setattr(engine.resolver, "resolve", must_not_resolve)
+    await engine.add(add("abcdefghijk"))
+    await drain(engine)
+    assert engine.player.loaded[-1]["video_url"] == str(path)

@@ -14,9 +14,12 @@ Tier order:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
+
+import httpx
 
 from .config import Settings
 from .invidious import InvidiousClient, InvidiousError
@@ -28,6 +31,15 @@ log = logging.getLogger(__name__)
 # googlevideo URLs are good for roughly six hours; expire ours well before that
 # so playback never starts against a dead link.
 STREAM_TTL_SECONDS = 3 * 3600
+
+# The playability probe reads one status line from googlevideo; anything
+# slower than this means mpv would have trouble with the URL anyway.
+PROBE_TIMEOUT = 8.0
+
+# Waits between probe attempts while a URL answers 403. About seven seconds
+# in all: past the warm-up window of a good URL, short enough that a tier
+# whose URLs never work is abandoned quickly.
+PROBE_RETRY_DELAYS = (1.0, 1.5, 2.0, 2.5)
 
 
 @dataclass
@@ -118,6 +130,7 @@ class Resolver:
         self.settings = settings
         self.tokens = tokens
         self._cache: dict[str, ResolvedStream] = {}
+        self._inflight: dict[str, asyncio.Future] = {}
         # Last outcome per tier, surfaced by /api/diagnostics. A tier that
         # never succeeds is invisible otherwise: once one works it is sorted
         # first and the others stop being tried at all.
@@ -154,17 +167,36 @@ class Resolver:
             chain.sort(key=lambda s: s.name != last)
         return chain
 
-    def format_selector(self) -> str:
+    def format_selector(self, muxed: bool = False) -> str:
+        """yt-dlp -f for playback, or for one file with sound and picture.
+
+        `muxed` is for saving a video when no ffmpeg is around to merge the
+        separate best streams: a single progressive file, usually 360p.
+        """
         height = self.settings.max_height
+        if muxed:
+            return f"b[height<=?{height}]/b"
         return f"bv*[height<=?{height}]+ba/b[height<=?{height}]/b"
 
     # --------------------------------------------------------------- resolve
 
-    async def resolve(self, video_id: str, force: bool = False) -> ResolvedStream:
-        cached = self._cache.get(video_id)
+    async def resolve(self, video_id: str, force: bool = False, muxed: bool = False) -> ResolvedStream:
+        key = _key(video_id, muxed)
+        cached = self._cache.get(key)
         if cached and not cached.expired and not force:
             return cached
 
+        # Prefetch, precache and playback can all ask for the same video at
+        # once. One trip through the chain answers them all; several in
+        # parallel is the burst pattern bot checks look for.
+        pending = self._inflight.get(key)
+        if pending is None:
+            pending = asyncio.ensure_future(self._resolve_chain(video_id, muxed))
+            self._inflight[key] = pending
+            pending.add_done_callback(lambda _: self._inflight.pop(key, None))
+        return await asyncio.shield(pending)
+
+    async def _resolve_chain(self, video_id: str, muxed: bool = False) -> ResolvedStream:
         url = f"https://www.youtube.com/watch?v={video_id}"
         attempts: list[str] = []
         last_kind = FailureKind.OTHER
@@ -172,7 +204,7 @@ class Resolver:
         for strategy in self.strategies():
             try:
                 info = await self.ytdlp.run_json(
-                    ["-J", "-f", self.format_selector(), *strategy.extra_args, url],
+                    ["-J", "-f", self.format_selector(muxed), *strategy.extra_args, url],
                     timeout=60,
                 )
             except YtDlpError as exc:
@@ -213,13 +245,25 @@ class Resolver:
                 tier=strategy.name,
                 headers=extract_headers(info),
             )
-            self._remember(stream)
+            # A clean resolve proves nothing about playback: some clients hand
+            # out URLs that 403 on the exact request mpv makes. Trusting one of
+            # those is how a single fallback used to turn the whole queue red
+            # -- it became last_successful_tier and every later song failed a
+            # second into playback. See docs/reliability.md.
+            problem = await self._unplayable(stream) if self.settings.verify_streams else None
+            if problem:
+                attempts.append(f"{strategy.name}: {problem}")
+                self.tier_health[strategy.name] = "unplayable"
+                last_kind = FailureKind.NO_FORMATS
+                log.info("resolve %s: tier %s returned URLs mpv cannot play (%s)", video_id, strategy.name, problem)
+                continue
+            self._remember(stream, muxed)
             return stream
 
         if self.settings.invidious_fallback:
             try:
                 stream = await self._resolve_invidious(video_id)
-                self._remember(stream)
+                self._remember(stream, muxed)
                 return stream
             except InvidiousError as exc:
                 attempts.append(f"invidious: {exc}")
@@ -239,8 +283,61 @@ class Resolver:
             tier="invidious",
         )
 
-    def _remember(self, stream: ResolvedStream) -> None:
-        self._cache[stream.video_id] = stream
+    async def _unplayable(self, stream: ResolvedStream) -> str | None:
+        """Why mpv could not play `stream`, or None if it can.
+
+        Sends what ffmpeg sends -- an open-ended `Range: bytes=0-` with the
+        stream's headers -- and reads only the status line. Measured October
+        2026: `default` (ANDROID_VR) URLs answer that with 403 while serving a
+        bounded range fine, so a bounded probe would wrongly pass them.
+        """
+        urls = [stream.video_url, *([stream.audio_url] if stream.audio_url else [])]
+        headers = {**stream.headers, "Range": "bytes=0-"}
+        try:
+            async with httpx.AsyncClient(timeout=PROBE_TIMEOUT, follow_redirects=True) as client:
+                for url in urls:
+                    if not url.startswith(("http://", "https://")):
+                        continue  # local file or lavfi source
+                    status = await self._probe_status(client, url, headers)
+                    if status not in (200, 206):
+                        return f"HTTP {status} on an open range"
+        except httpx.HTTPError as exc:
+            return f"probe failed: {exc.__class__.__name__}"
+        return None
+
+    async def _probe_status(self, client: httpx.AsyncClient, url: str, headers: dict[str, str]) -> int:
+        """Status of `url`, waiting out googlevideo's warm-up 403s.
+
+        Measured October 2026: a freshly issued web_embedded or mweb URL
+        answers 403 for its first two or three seconds, then 206 for good.
+        mpv opening it immediately was the main way songs failed -- above all
+        the retry after an error, which re-resolved and loaded at once, so it
+        always hit the window. Retrying here both tells a warming URL from a
+        dead one (ANDROID_VR stays 403) and leaves it warm for mpv.
+        """
+        status = 0
+        for delay in (0.0, *PROBE_RETRY_DELAYS):
+            if delay:
+                await asyncio.sleep(delay)
+            async with client.stream("GET", url, headers=headers) as response:
+                status = response.status_code
+            if status != 403:
+                break
+        return status
+
+    def demote(self, tier: str) -> None:
+        """Stop preferring a tier whose stream failed in the player.
+
+        Called when playback dies despite the probe passing, so the retry walks
+        the chain from the top instead of going straight back to the same tier.
+        """
+        self.tier_health[tier] = "playback_failed"
+        if self.settings.last_successful_tier == tier:
+            self.settings.last_successful_tier = None
+            self.settings.save()
+
+    def _remember(self, stream: ResolvedStream, muxed: bool = False) -> None:
+        self._cache[_key(stream.video_id, muxed)] = stream
         self.tier_health[stream.tier] = "ok"
         if self.settings.last_successful_tier != stream.tier:
             self.settings.last_successful_tier = stream.tier
@@ -250,6 +347,7 @@ class Resolver:
     def invalidate(self, video_id: str) -> None:
         """Drop a cached stream — call this when playback fails mid-flight."""
         self._cache.pop(video_id, None)
+        self._cache.pop(_key(video_id, True), None)
 
     def invalidate_all(self) -> None:
         """Drop every cached stream — e.g. after yt-dlp is updated, so retries
@@ -259,6 +357,11 @@ class Resolver:
     def prune(self) -> None:
         for video_id in [k for k, v in self._cache.items() if v.expired]:
             del self._cache[video_id]
+
+
+def _key(video_id: str, muxed: bool) -> str:
+    """Cache key: a muxed resolve is a different answer for the same video."""
+    return f"{video_id}#muxed" if muxed else video_id
 
 
 def _summarize(stderr: str, limit: int = 300) -> str:

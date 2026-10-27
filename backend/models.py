@@ -39,6 +39,13 @@ class QueueItem(BaseModel):
     channel: str | None = None
     duration: float | None = None
     thumbnail: str | None = None
+    # Who is singing it, for karaoke nights. Shown in the in-video overlay
+    # instead of (or beside) the title, per settings.overlay_label.
+    singer: str | None = None
+    # A file from the user's library folders, played as-is: no resolve, no
+    # prefetch, no SponsorBlock. Set by the engine from the scan, never taken
+    # from a request, so only files inside those folders can be queued.
+    local_path: str | None = None
     state: ItemState = ItemState.PENDING
     # `error` stays the English text so anything reading the API still works;
     # `error_code` is what the UI translates. A missing key falls back to text.
@@ -76,6 +83,13 @@ class AppState(BaseModel):
     notice: str | None = None
     notice_code: str | None = None
     notice_params: dict[str, str] = Field(default_factory=dict)
+    # Video ids, so any list in the UI can mark a song as starred / on disk.
+    favourites: list[str] = Field(default_factory=list)
+    downloads: list[str] = Field(default_factory=list)
+    # Saved to the user's download folder, and saves in progress this session
+    # (video id -> {state, progress, path, error}).
+    saved: list[str] = Field(default_factory=list)
+    saving: dict[str, dict] = Field(default_factory=dict)
 
 
 class AddRequest(BaseModel):
@@ -84,6 +98,7 @@ class AddRequest(BaseModel):
     channel: str | None = None
     duration: float | None = None
     thumbnail: str | None = None
+    singer: str | None = None
     play_now: bool = False
 
 
@@ -97,6 +112,10 @@ class ReorderRequest(BaseModel):
 class SeekRequest(BaseModel):
     seconds: float
     absolute: bool = True
+
+
+class SingerRequest(BaseModel):
+    singer: str | None = Field(default=None, max_length=80)
 
 
 class VolumeRequest(BaseModel):

@@ -80,6 +80,55 @@ curl -o /dev/null -w '%{http_code}\n' "<stream url>"
 Anything other than 206/200 means mpv will not play it, however healthy the
 resolve looked.
 
+The resolver now does this check itself (`verify_streams`, on by default):
+every resolved stream is requested with an open range and the stream's own
+headers before its tier counts as working. Two things measured in October
+2026 make that necessary:
+
+- **`default` resolves via ANDROID_VR**, whose URLs answer `bytes=0-` (and a
+  plain GET) with 403 forever while serving `bytes=0-1000` fine. A *bounded*
+  probe would wrongly pass them.
+- **Fresh URLs 403 for their first two or three seconds** — `web_embedded`
+  and `mweb` both — then serve normally. A prefetched URL is minutes old and
+  plays; one handed to mpv the instant it was resolved does not. The probe
+  retries a 403 for about seven seconds, which tells warming from dead and
+  leaves a good URL warm for mpv.
+
+Together these were how a queue "went red after a few songs": a fallback
+landed on `client:default`, it became `last_successful_tier`, and every later
+song failed a second into playback — including each retry, which re-resolved
+and loaded at once, inside the warm-up window. Two guards keep it from
+recurring: a stream that still dies in the player demotes its tier
+(`Resolver.demote`), and two non-per-video failures in a row stall the queue
+and retry with backoff (`engine.STALL_AFTER`) instead of failing every item.
+
+The offline cache downloads in 10 MB ranges for the same reason; a plain GET
+is refused outright by some clients.
+
+### Frozen streams and the watchdog
+
+Two more ways a song stops without any error reaching the app:
+
+- **mpv's pause is global.** Pausing in the player window (Space, a click)
+  and then moving on used to load every later song paused at 0:00, while the
+  app — which ignores pause changes mid-load — kept showing it as playing.
+  `MpvPlayer._load_blocking` now unpauses before every load.
+- **A seek can hang inside mpv.** Seeking a googlevideo stream to within a
+  few seconds of its end (by hand, or a SponsorBlock outro skip) logs
+  `[ffmpeg] Seek failed` and then waits on a read that never completes —
+  still "playing", position frozen, past mpv's own network timeout, no
+  end-file. Reloading the file at the same position recovers it at once.
+
+`Engine._watchdog` checks every few seconds: a song that should be playing
+whose position has not moved for `STUCK_SECONDS` is reloaded where it froze,
+or, within `END_SLACK_SECONDS` of the end, treated as finished. After
+`MAX_RECOVERIES` reloads it is handled as a playback failure, which feeds the
+same stall-and-retry logic as everything else. A paused song, the pause
+between songs, and a song still at 0:00 (a slow start) are left alone.
+
+Logs are written to `logs/backend.log` in the user data directory, so the
+reason a song failed survives a packaged (console-less) run.
+
 A tier failing moves to the next. A video that is *unavailable* — deleted,
 private, members-only — aborts the chain immediately, because no client,
 token or cookie will bring it back.
@@ -145,24 +194,34 @@ the app works on release day and dies quietly a month later.
 
 ## Bundled helper binaries
 
-The installer ships mpv, yt-dlp and deno in `vendor/`, because a machine that
-has none of them is the normal case — the app is otherwise dead on arrival
-there, with no playback and no extraction. `build/youtube-queue-backend.spec`
-picks the directory up automatically when it exists; the repo copy is
-gitignored, so populate it before building a release:
+The installer ships mpv, yt-dlp, deno and ffmpeg in `vendor/`, because a
+machine that has none of them is the normal case — the app is otherwise dead
+on arrival there, with no playback and no extraction. ffmpeg is what lets a
+saved video be the best video and audio streams merged into one file; without
+it a save falls back to YouTube's single-file format, usually 360p.
+`build/youtube-queue-backend.spec` picks the directory up automatically when
+it exists; the repo copy is gitignored, so populate it before building a
+release:
 
 ```
 vendor/mpv.exe          vendor/mpv.com      vendor/d3dcompiler_43.dll
-vendor/yt-dlp.exe       vendor/deno.exe
+vendor/yt-dlp.exe       vendor/deno.exe     vendor/ffmpeg.exe
+vendor/ffmpeg-LICENSE.txt
 ```
+
+ffmpeg.exe comes from BtbN's builds, the `ffmpeg-n8.1-latest-win64-lgpl-8.1.zip`
+asset at https://github.com/BtbN/FFmpeg-Builds/releases — check it against
+that release's `checksums.sha256` before extracting. The LGPL build is
+enough: saving only remuxes (`-c copy`), it never encodes.
 
 `find_binary` prefers, in order: an explicit setting, the auto-updated copy in
 the user data dir, the bundled copy, `PATH`, then the well-known install
 locations below. The user-dir copy outranking the bundle is deliberate — it is
 how `backend.updater` can ship a newer yt-dlp than the one built in.
 
-Note mpv is GPL-licensed; bundling it makes the installer a combined work, so
-redistributing it publicly carries source-availability obligations.
+Note mpv is GPL-licensed (ffmpeg, as bundled, is LGPL); bundling them makes
+the installer a combined work, so redistributing it publicly carries
+source-availability obligations.
 
 ## Windows: installers that never touch PATH
 

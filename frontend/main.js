@@ -6,7 +6,7 @@
  * Electron window at all — it is mpv, spawned by the backend.
  */
 
-const { app, BrowserWindow, dialog, session, shell } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, session, shell } = require('electron');
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -183,6 +183,16 @@ async function postToBackend(pathname, body) {
 }
 
 // ----------------------------------------------------------------- windows
+
+// The download-folder picker in the settings panel. A web page can only read
+// files it is handed, never name a directory, so the native dialog lives here.
+ipcMain.handle('choose-directory', async (_event, current) => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    defaultPath: typeof current === 'string' ? current : undefined,
+    properties: ['openDirectory', 'createDirectory']
+  });
+  return result.canceled ? null : result.filePaths[0];
+});
 
 function createMainWindow() {
   mainWindow = new BrowserWindow({

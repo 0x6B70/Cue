@@ -21,6 +21,7 @@ def client(settings, monkeypatch, tmp_path, stub_ytdlp):
     monkeypatch.setattr(main_module.settings, "invidious_fallback", False)
     monkeypatch.setattr(main_module.settings, "sponsorblock_enabled", False)
     monkeypatch.setattr(main_module.settings, "prefetch_ahead", 0)
+    monkeypatch.setattr(main_module.settings, "verify_streams", False)
     main_module.engine.queue.state_path = tmp_path / "queue.json"
     main_module.app.state.open_player = False
     with TestClient(main_module.app) as test_client:
@@ -273,3 +274,86 @@ def test_seek_and_volume_also_report_a_missing_player(client, monkeypatch):
 
     assert client.post("/api/player/seek", json={"seconds": 5}).status_code == 503
     assert client.post("/api/player/volume", json={"level": 50}).status_code == 503
+
+
+def test_library_endpoints_round_trip(client):
+    assert client.put("/api/library/favourites/vid001", json={"title": "Fav Song"}).status_code == 200
+    favourites = client.get("/api/library/favourites").json()
+    assert [f["id"] for f in favourites] == ["vid001"]
+    assert "vid001" in client.get("/api/state").json()["favourites"]
+    assert client.get("/api/library/search", params={"q": "fav"}).json()[0]["id"] == "vid001"
+    assert client.delete("/api/library/favourites/vid001").status_code == 200
+    assert client.get("/api/library/favourites").json() == []
+    stats = client.get("/api/library/stats").json()
+    assert {"plays", "listened_seconds", "top_tracks", "days"} <= set(stats)
+    assert isinstance(client.get("/api/library/history").json(), list)
+    assert isinstance(client.get("/api/library/downloads").json(), list)
+
+
+def test_singer_can_be_set_on_a_queue_item(client):
+    client.post("/api/queue", json={"video_id": "abc", "title": "T", "singer": "Maria"})
+    assert client.get("/api/state").json()["items"][0]["singer"] == "Maria"
+    assert client.put("/api/queue/0/singer", json={"singer": "Eleni"}).status_code == 200
+    assert client.get("/api/state").json()["items"][0]["singer"] == "Eleni"
+    assert client.put("/api/queue/9/singer", json={"singer": "x"}).status_code == 404
+
+
+def test_overlay_settings_are_validated(client):
+    assert client.put("/api/settings", json={"overlay_style": "bar"}).status_code == 200
+    assert client.put("/api/settings", json={"overlay_style": "nope"}).status_code == 400
+    assert client.put("/api/settings", json={"overlay_label": "singer"}).status_code == 200
+    assert client.put("/api/settings", json={"overlay_boxes": 9}).status_code == 400
+    assert client.put("/api/settings", json={"overlay_accent_color": "#12ab34"}).status_code == 200
+    assert client.put("/api/settings", json={"overlay_accent_color": "red}{\\fs90"}).status_code == 400
+
+
+def test_suggest_with_empty_query_is_empty(client):
+    assert client.get("/api/suggest", params={"q": " "}).json() == []
+
+
+def test_logo_upload_is_validated_and_stored(client):
+    from backend.player import logo_path
+
+    assert client.post("/api/overlay/logo?w=2&h=2", content=b"\x00" * 15).status_code == 400
+    assert client.post("/api/overlay/logo?w=4000&h=2", content=b"\x00" * 32000).status_code == 422
+    response = client.post("/api/overlay/logo?w=2&h=2", content=b"\xff" * 16)
+    assert response.status_code == 200
+    assert main_module.settings.overlay_logo_size == [2, 2]
+    assert logo_path().read_bytes() == b"\xff" * 16
+    assert client.delete("/api/overlay/logo").status_code == 200
+    assert main_module.settings.overlay_logo_size is None
+    assert not logo_path().exists()
+
+
+def test_saved_listing_reports_folder_and_ffmpeg(client):
+    body = client.get("/api/library/saved").json()
+    assert {"directory", "ffmpeg", "items"} <= set(body)
+    assert client.put("/api/settings", json={"download_format": "flac"}).status_code == 400
+    assert client.delete("/api/library/saved/nothing").status_code == 409
+
+
+def test_library_folders_are_listed_and_queueable(client, tmp_path):
+    folder = tmp_path / "Karaoke"
+    folder.mkdir()
+    (folder / "Local Song.mp4").write_bytes(b"v")
+    assert client.put("/api/settings", json={"library_folders": [str(folder)]}).status_code == 200
+    body = client.get("/api/library/local", params={"q": "local"}).json()
+    assert str(folder) in body["folders"]
+    [entry] = body["items"]
+    assert entry["title"] == "Local Song" and entry["local"]
+    assert client.post("/api/queue", json={"video_id": entry["id"]}).status_code == 200
+    assert client.get("/api/state").json()["items"][0]["local_path"] == entry["path"]
+    assert client.post("/api/queue", json={"video_id": "local-ffffffffffffffff"}).status_code == 404
+    assert client.put("/api/settings", json={"library_folders": "C:/"}).status_code == 400
+    found = client.get("/api/library/search", params={"q": "local song"}).json()
+    assert found[0]["id"] == entry["id"]
+    client.put("/api/settings", json={"library_folders": []})
+
+
+def test_track_stats_endpoint(client):
+    main_module.engine.library.remember("statsvid", "Stats Song")
+    play = main_module.engine.library.start_play("statsvid", "Maria")
+    main_module.engine.library.finish_play(play, 120, True)
+    body = client.get("/api/library/track/statsvid").json()
+    assert body["plays"] >= 1 and body["singers"][0]["singer"] == "Maria"
+    assert client.get("/api/library/track/nothing-here").status_code == 404

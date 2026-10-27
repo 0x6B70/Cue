@@ -60,6 +60,12 @@ _WINDOWS_HINTS: dict[str, tuple[str, ...]] = {
         r"%USERPROFILE%\.deno\bin\deno.exe",
         r"%USERPROFILE%\scoop\shims\deno.exe",
     ),
+    "ffmpeg": (
+        r"%LOCALAPPDATA%\Microsoft\WinGet\Links\ffmpeg.exe",
+        r"%USERPROFILE%\scoop\shims\ffmpeg.exe",
+        r"%ProgramData%\chocolatey\bin\ffmpeg.exe",
+        r"%ProgramFiles%\ffmpeg\bin\ffmpeg.exe",
+    ),
     "yt-dlp": (
         r"%LOCALAPPDATA%\Microsoft\WinGet\Links\yt-dlp.exe",
         r"%USERPROFILE%\scoop\shims\yt-dlp.exe",
@@ -149,13 +155,15 @@ class Settings:
     volume: int = 100
     locale: str = "en"
     # Tier 2 of the resolver chain walks this list. "default" means "whatever
-    # yt-dlp picks on its own". Measured against live YouTube: `default` and
-    # `web_embedded` return full adaptive formats; `tv_simply` and `mweb` fall
-    # back to muxed 360p unless they get a GVS PO token (see potoken_clients).
-    # `tv` (DRM experiment), `ios` and `web_safari` (images only) all fail
-    # outright and are deliberately absent. Re-measure before changing.
+    # yt-dlp picks on its own". Measured against live YouTube (October 2026):
+    # `web_embedded`, `tv_simply` and `mweb` all return URLs mpv plays;
+    # `default` now resolves via ANDROID_VR, whose URLs 403 on the open-ended
+    # range mpv requests, so it goes after the clients that work (the
+    # playability probe catches it either way -- see verify_streams). `tv`
+    # (DRM experiment), `ios` and `web_safari` (images only) fail outright and
+    # are deliberately absent. Re-measure before changing.
     player_clients: list[str] = field(
-        default_factory=lambda: ["default", "web_embedded", "tv_simply", "mweb"]
+        default_factory=lambda: ["web_embedded", "tv_simply", "default", "mweb"]
     )
     # Clients the minted gvs PO token is offered to.
     #
@@ -194,6 +202,10 @@ class Settings:
     # Merged into mpv's command line, e.g. {"hwdec": "auto-safe", "vo": "gpu"}.
     # Keys use mpv's option names with underscores for dashes.
     mpv_options: dict = field(default_factory=dict)
+    # Before trusting a resolved stream, request it the way mpv will and drop
+    # the tier if YouTube refuses. Costs one status line per resolve; without
+    # it a tier whose URLs 403 in the player still counts as working.
+    verify_streams: bool = True
     prefetch_ahead: int = 1
     # Download upcoming videos to disk so they play even if YouTube later blocks
     # extraction -- the one thing that survives any upstream change. On by
@@ -219,6 +231,49 @@ class Settings:
     # full set of choices is player.OVERLAY_ALIGNMENTS; PUT /api/settings rejects
     # anything outside it.
     overlay_position: str = "bottom-right"
+    # "bar" draws a karaoke-style strip of numbered boxes along the bottom (or
+    # top, following overlay_position) edge; "list" is the original corner
+    # list. See backend/overlay.py.
+    overlay_style: str = "bar"
+    # What each upcoming entry shows: "title", "singer" or "both". An entry
+    # with no singer name always falls back to its title.
+    overlay_label: str = "both"
+    # Number of boxes in the bar, 1-6.
+    overlay_boxes: int = 3
+    # Text at the left of the bar and on top of the intermission card, e.g. a
+    # karaoke night's name. Empty draws nothing.
+    overlay_brand: str = ""
+    # Replace the bar / intermission headings. Empty uses the localised default
+    # ("NEXT UP", "NEXT ON STAGE").
+    overlay_bar_heading: str = ""
+    overlay_stage_heading: str = ""
+    # Time left in the song, in a box at the left of the bar.
+    overlay_show_timer: bool = True
+    overlay_accent_color: str = "#a78bfa"
+    overlay_bar_color: str = "#14151d"
+    overlay_box_color: str = "#3b3f52"
+    # Full-screen "next on stage" card with a countdown, shown during the
+    # pause between songs (gap_seconds). Needs a gap to have anything to show.
+    show_intermission: bool = True
+    intermission_color: str = "#5b3f78"
+    # [width, height] of the uploaded logo (user_data_dir/logo.bgra), or None.
+    # Drawn at the left of the bar and on top of the intermission card. The UI
+    # decodes the image and uploads raw pixels, so no imaging library is needed.
+    overlay_logo_size: list | None = None
+    # Where saved videos go. None means <home>/Videos/Cue.
+    download_dir: str | None = None
+    # More folders whose videos are listed, searched and queued alongside the
+    # download folder, which is always included. See backend/localfiles.py.
+    library_folders: list[str] = field(default_factory=list)
+    # "video" saves picture and sound; "audio" saves the sound alone, at full
+    # quality, with no ffmpeg needed.
+    download_format: str = "video"
+    # Save every song to download_dir once it has played to the end.
+    download_played: bool = False
+    # ffmpeg merges the separate best video and audio streams into one file.
+    # Without it a video save falls back to the single-file format YouTube
+    # offers, usually 360p.
+    ffmpeg_path: str | None = None
     # Start each session with an empty queue. Only applies to a clean exit --
     # if the app is killed outright, nothing gets the chance to run.
     clear_queue_on_exit: bool = True
@@ -258,3 +313,11 @@ class Settings:
 
     def js_runtime_binary(self) -> str | None:
         return find_binary("deno", self.js_runtime_path)
+
+    def ffmpeg_binary(self) -> str | None:
+        return find_binary("ffmpeg", self.ffmpeg_path)
+
+    def download_directory(self) -> Path:
+        if self.download_dir:
+            return Path(os.path.expandvars(os.path.expanduser(self.download_dir)))
+        return Path.home() / "Videos" / "Cue"

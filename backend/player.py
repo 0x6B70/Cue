@@ -21,12 +21,22 @@ from typing import Any
 
 from python_mpv_jsonipc import MPV, MPVError
 
-from .config import Settings
+from .config import Settings, user_data_dir
 from .models import PlaybackState, PlayerStatus
+from .overlay import (
+    CANVAS_HEIGHT,
+    DEFAULT_CANVAS_WIDTH,
+    OverlayTheme,
+    UpcomingEntry,
+    bar_logo_box,
+    card_logo_box,
+    compose_bar,
+    compose_intermission,
+)
 
 log = logging.getLogger(__name__)
 
-OBSERVED_PROPERTIES = ("time-pos", "duration", "pause", "volume", "mute", "core-idle")
+OBSERVED_PROPERTIES = ("time-pos", "duration", "pause", "volume", "mute", "core-idle", "osd-dimensions")
 
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
 
@@ -64,6 +74,16 @@ OVERLAY_ALIGNMENTS = {
 OVERLAY_DEFAULT_POSITION = "bottom-right"
 
 OVERLAY_HEADING = "Up next"
+
+# Bitmap overlay ids (overlay-add has its own namespace, separate from
+# osd-overlay's): the logo in the bar and the larger one on the card.
+LOGO_BAR_ID = 1
+LOGO_CARD_ID = 2
+
+
+def logo_path():
+    """Raw premultiplied BGRA pixels of the user's logo; see /api/overlay/logo."""
+    return user_data_dir() / "logo.bgra"
 
 # Written as an escape rather than the literal character, which is invisible in
 # a source file and reads as a typo.
@@ -122,6 +142,16 @@ def compose_upcoming(
     return style + body
 
 
+def _list_label(entry: UpcomingEntry, mode: str) -> str:
+    """One line of the classic "up next" list under the chosen label mode."""
+    singer = (entry.singer or "").strip()
+    if not singer or mode == "title":
+        return entry.title
+    if mode == "singer":
+        return singer
+    return f"{singer} — {entry.title}"
+
+
 def _ensure_dead(process: subprocess.Popen | None) -> None:
     """Make certain an mpv process is gone, children included.
 
@@ -172,8 +202,20 @@ class MpvPlayer:
         # The overlay is write-only as far as mpv is concerned -- no property
         # reads it back -- so the desired list is kept here and redrawn from
         # scratch whenever a new mpv process comes up.
-        self._upcoming: list[str] = []
+        self._upcoming: list[str | UpcomingEntry] = []
         self._overlay_text = ""
+        # The karaoke card between songs, as (entry, seconds left, total), and
+        # the bar's timer text. Both are drawn into the same overlay.
+        self._intermission: tuple[UpcomingEntry, float, float] | None = None
+        self._timer: str | None = None
+        # Width of the overlay canvas, matched to the window's aspect ratio
+        # so boxes stay square-cornered rather than stretched.
+        self._canvas_width = DEFAULT_CANVAS_WIDTH
+        # Window height in pixels, to place the logo bitmap, which (unlike
+        # ASS) is positioned in real pixels.
+        self._osd_height = CANVAS_HEIGHT
+        # Logo bitmaps currently drawn: id -> the overlay-add arguments.
+        self._logos: dict[int, tuple] = {}
 
         # Callbacks installed by the engine.
         self.on_end_file: Callable[[str], None] | None = None
@@ -243,6 +285,7 @@ class MpvPlayer:
         # while the window was shut has to be drawn again. This runs on the
         # executor thread that started mpv, where blocking IPC is fine.
         self._overlay_text = ""
+        self._logos = {}
         self._apply_upcoming()
 
     def shutdown(self) -> None:
@@ -307,7 +350,27 @@ class MpvPlayer:
         elif name == "core-idle":
             if value and status.state is PlaybackState.PLAYING and status.position == 0:
                 return  # buffering, not a state change worth reporting
+        elif name == "osd-dimensions":
+            width, height = (value or {}).get("w") or 0, (value or {}).get("h") or 0
+            if width > 0 and height > 0:
+                canvas = round(CANVAS_HEIGHT * width / height)
+                if canvas != self._canvas_width or height != self._osd_height:
+                    self._canvas_width = canvas
+                    self._osd_height = height
+                    self._dispatch(self._redraw_soon)
+            return
         self._dispatch(self.on_status_change)
+
+    def _redraw_soon(self) -> None:
+        """Repaint the overlay from the event loop (the window was resized)."""
+        if self.running:
+            asyncio.ensure_future(self._redraw())
+
+    async def _redraw(self) -> None:
+        try:
+            await self._call(self._apply_upcoming)
+        except PlayerUnavailable:
+            pass
 
     # ------------------------------------------------------------- commands
 
@@ -318,7 +381,15 @@ class MpvPlayer:
         return mpv
 
     async def _call(self, fn: Callable[..., Any], *args: Any) -> Any:
-        return await asyncio.get_running_loop().run_in_executor(None, fn, *args)
+        try:
+            return await asyncio.get_running_loop().run_in_executor(None, fn, *args)
+        except OSError as exc:
+            # python-mpv-jsonipc raises TimeoutError after 120s with no reply
+            # and BrokenPipeError once mpv is gone -- neither is an MPVError, so
+            # they used to escape every handler and leave the queue frozen
+            # mid-advance. Both mean the same thing as a closed window.
+            log.warning("mpv IPC failed: %r", exc)
+            raise PlayerUnavailable(f"the player stopped responding ({exc})") from exc
 
     async def load(
         self,
@@ -327,12 +398,13 @@ class MpvPlayer:
         title: str,
         headers: dict[str, str] | None = None,
         video_id: str | None = None,
+        start: float | None = None,
     ) -> None:
         await self.ensure_started()
         self._current_video_id = video_id
         self.status.state = PlaybackState.LOADING
-        self.status.position = 0.0
-        await self._call(self._load_blocking, video_url, audio_url, title, headers)
+        self.status.position = start or 0.0
+        await self._call(self._load_blocking, video_url, audio_url, title, headers, start)
         self.status.state = PlaybackState.PLAYING
 
     def _load_blocking(
@@ -341,9 +413,12 @@ class MpvPlayer:
         audio_url: str | None,
         title: str,
         headers: dict[str, str] | None,
+        start: float | None = None,
     ) -> None:
         mpv = self._require()
         options: dict[str, Any] = {"force-media-title": title}
+        if start:
+            options["start"] = f"{start:.3f}"
         if audio_url:
             options["audio-file"] = audio_url
 
@@ -361,6 +436,15 @@ class MpvPlayer:
         # dies about a second after it starts. Sending a real array over the
         # IPC skips mpv's string list parser altogether.
         self._set_header_fields(mpv, fields)
+
+        # mpv's pause is global, not per file: pausing in the player window and
+        # then moving on used to load every later song paused at 0:00, while
+        # the app -- which ignores pause changes mid-load -- reported it as
+        # playing. Starting a song means playing it.
+        try:
+            mpv.command("set_property", "pause", False)
+        except MPVError:
+            log.debug("could not unpause before loading", exc_info=True)
 
         try:
             # mpv >= 0.38 takes per-file options as the 4th loadfile argument,
@@ -413,41 +497,153 @@ class MpvPlayer:
         one next appears, so the engine never has to care whether mpv is up.
         """
         self._upcoming = list(titles)
+        await self._repaint()
+
+    async def set_intermission(
+        self, entry: UpcomingEntry | None, remaining: float = 0.0, total: float = 0.0
+    ) -> None:
+        """Show (or with None, remove) the full-screen card between songs."""
+        self._intermission = (entry, remaining, total) if entry else None
+        await self._repaint()
+
+    async def set_timer(self, text: str | None) -> None:
+        """Set the bar's timer box: time left in the song, or the countdown."""
+        if text == self._timer:
+            return
+        self._timer = text
+        if self.settings.overlay_style == "bar":
+            await self._repaint()
+
+    async def _repaint(self) -> None:
         if not self.running:
             return
         await self._call(self._apply_upcoming)
 
+    def theme(self) -> OverlayTheme:
+        s = self.settings
+        return OverlayTheme(
+            label_mode=s.overlay_label,
+            brand=s.overlay_brand or "",
+            bar_heading=s.overlay_bar_heading or "",
+            stage_heading=s.overlay_stage_heading or "",
+            accent=s.overlay_accent_color,
+            bar_color=s.overlay_bar_color,
+            box_color=s.overlay_box_color,
+            background=s.intermission_color,
+            boxes=s.overlay_boxes,
+            at_top=str(s.overlay_position).startswith("top"),
+            locale=s.locale,
+        )
+
+    def logo_size(self) -> tuple[int, int] | None:
+        size = self.settings.overlay_logo_size
+        if not (isinstance(size, (list, tuple)) and len(size) == 2 and all(isinstance(v, int) and v > 0 for v in size)):
+            return None
+        if not logo_path().is_file():
+            return None
+        return size[0], size[1]
+
+    def _bar_visible(self) -> bool:
+        return self.settings.overlay_style == "bar" and bool(self._upcoming or self._intermission)
+
+    def compose_overlay(self) -> tuple[str, int]:
+        """The full overlay as ASS events, plus the canvas width to draw it on.
+
+        Width 0 asks mpv to derive it from the window, keeping pixels square;
+        the list style is laid out by alignment alone and needs nothing more.
+        """
+        entries = [e if isinstance(e, UpcomingEntry) else UpcomingEntry(title=e) for e in self._upcoming]
+        theme = self.theme()
+        width = self._canvas_width
+        logo = self.logo_size()
+        events: list[str] = []
+        if self._intermission:
+            entry, remaining, total = self._intermission
+            events += compose_intermission(entry, remaining, total, theme, width, logo=bool(logo))
+        if self.settings.overlay_style == "bar":
+            if self._bar_visible():
+                timer = self._timer if self.settings.overlay_show_timer else None
+                logo_width = bar_logo_box(logo, theme)[2] if logo else 0
+                events += compose_bar(entries, theme, timer, width, logo_width)
+            return "\n".join(events), width
+        if entries:
+            labels = [_list_label(entry, theme.label_mode) for entry in entries]
+            events.append(
+                compose_upcoming(labels, self.settings.overlay_font_size, self.settings.overlay_position)
+            )
+        return "\n".join(events), (width if self._intermission else 0)
+
     def _apply_upcoming(self) -> None:
-        """Push the remembered list to mpv. Runs off the event loop."""
+        """Push the remembered overlay to mpv. Runs off the event loop."""
         mpv = self.mpv
         if mpv is None:
             return
-        text = (
-            compose_upcoming(
-                self._upcoming,
-                self.settings.overlay_font_size,
-                self.settings.overlay_position,
-            )
-            if self._upcoming
-            else ""
-        )
+        self._apply_logos(mpv)
+        text, res_x = self.compose_overlay()
         if text == self._overlay_text:
             return
         try:
             if text:
                 mpv.command(
-                    "osd-overlay", UPCOMING_OVERLAY_ID, "ass-events", text, 0, OVERLAY_RES_Y
+                    "osd-overlay", UPCOMING_OVERLAY_ID, "ass-events", text, res_x, OVERLAY_RES_Y
                 )
             else:
                 # Format "none" unregisters the overlay outright. Passing
                 # ass-events with empty data leaves an empty one behind, which
                 # mpv keeps compositing for nothing.
                 mpv.command("osd-overlay", UPCOMING_OVERLAY_ID, "none", "", 0, OVERLAY_RES_Y)
-        except MPVError:
+        except (MPVError, OSError):
             # Cosmetic: a failure here must never interrupt playback.
             log.debug("could not update the upcoming overlay", exc_info=True)
             return
         self._overlay_text = text
+
+    def logo_placements(self) -> dict[int, tuple[int, int, int, int]]:
+        """Where each logo bitmap belongs right now, as window-pixel boxes."""
+        logo = self.logo_size()
+        if not logo:
+            return {}
+        scale = self._osd_height / CANVAS_HEIGHT
+        boxes = {}
+        if self._bar_visible():
+            boxes[LOGO_BAR_ID] = bar_logo_box(logo, self.theme())
+        if self._intermission:
+            boxes[LOGO_CARD_ID] = card_logo_box(logo, self._canvas_width)
+        return {key: tuple(max(1, round(v * scale)) if i >= 2 else round(v * scale) for i, v in enumerate(box))
+                for key, box in boxes.items()}
+
+    def _apply_logos(self, mpv: MPV) -> None:
+        """Add, move or remove the logo bitmaps to match logo_placements().
+
+        overlay-add reads the raw pixels from the file and scales them to the
+        display size itself (its dw/dh arguments), so one upload serves every
+        window size.
+        """
+        wanted = {}
+        logo = self.logo_size()
+        for key, (x, y, w, h) in self.logo_placements().items():
+            wanted[key] = (key, x, y, str(logo_path()), 0, "bgra", logo[0], logo[1], logo[0] * 4, w, h)
+        for key in list(self._logos):
+            if key not in wanted:
+                try:
+                    mpv.command("overlay-remove", key)
+                except (MPVError, OSError):
+                    log.debug("could not remove logo overlay", exc_info=True)
+                del self._logos[key]
+        for key, args in wanted.items():
+            if self._logos.get(key) == args:
+                continue
+            try:
+                mpv.command("overlay-add", *args)
+            except (MPVError, OSError):
+                log.debug("could not draw the logo", exc_info=True)
+                continue
+            self._logos[key] = args
+
+    def reload_logo(self) -> None:
+        """Forget what is drawn so the next repaint re-reads the logo file."""
+        self._logos = {}
+        self._overlay_text = ""
 
     async def stop(self) -> None:
         if not self.running:

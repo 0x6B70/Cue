@@ -40,6 +40,8 @@ AUDIO_SOURCE = "av://lavfi:sine=duration=1:frequency=440"
 async def player(settings):
     settings.mpv_options = HEADLESS
     settings.volume = 40
+    # The layout tests below are about the corner list; the bar has its own.
+    settings.overlay_style = "list"
     instance = MpvPlayer(settings, asyncio.get_running_loop())
     try:
         await instance.ensure_started()
@@ -307,3 +309,40 @@ async def test_missing_binary_raises_player_unavailable(settings):
     instance = MpvPlayer(settings, asyncio.get_running_loop())
     with pytest.raises(PlayerUnavailable):
         await instance.ensure_started()
+
+
+async def test_karaoke_bar_and_intermission_reach_mpv(player):
+    """The bar lays out along the bottom edge, inside the frame, and the
+    intermission card covers the whole canvas while it is up."""
+    from backend.overlay import UpcomingEntry
+
+    player.settings.overlay_style = "bar"
+    await player.set_upcoming([UpcomingEntry("Alpha", "Maria"), UpcomingEntry("Beta")])
+    await player.set_timer("03:12")
+    assert "Maria" in player._overlay_text and "[03:12]" in player._overlay_text
+    text, width = player.compose_overlay()
+    bar = await player._call(
+        lambda: player.mpv.command("osd-overlay", PROBE_OVERLAY_ID, "ass-events", text, width, OVERLAY_RES_Y, 0, False, True)
+    )
+    assert bar["y0"] > OVERLAY_RES_Y * 0.8, "bar is not along the bottom"
+
+    await player.set_intermission(UpcomingEntry("Alpha", "Maria"), 3.0, 10.0)
+    text, width = player.compose_overlay()
+    card = await player._call(
+        lambda: player.mpv.command("osd-overlay", PROBE_OVERLAY_ID, "ass-events", text, width, OVERLAY_RES_Y, 0, False, True)
+    )
+    assert card["y0"] <= 1 and card["y1"] >= OVERLAY_RES_Y - 1, "card does not cover the window"
+    await player.set_intermission(None)
+    assert "ΕΠΟΜΕΝΟΣ" not in player._overlay_text and "NEXT ON STAGE" not in player._overlay_text
+
+
+async def test_a_new_song_starts_unpaused_even_if_mpv_was_paused(player):
+    """mpv's pause is global: pausing in the player window used to make every
+    later song load paused at 0:00 while the app reported it as playing."""
+    await player.load(VIDEO_SOURCE, None, "first")
+    assert await wait_for(lambda: player.status.position > 0)
+    await player._call(lambda: player.mpv.command("set_property", "pause", True))
+    await player.load(VIDEO_SOURCE, None, "second")
+    paused = await player._call(lambda: player.mpv.command("get_property", "pause"))
+    assert paused is False
+    assert await wait_for(lambda: player.status.position > 0), "second song never started"
