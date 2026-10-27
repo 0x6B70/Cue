@@ -1,6 +1,6 @@
 {
   "name": "cue",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Cue — a desktop YouTube queue player: search in one window, ad-free playback in another.",
   "main": "frontend/main.js",
   "private": true,
